@@ -41,7 +41,7 @@ class NeuralRenderer(nn.Module):
         cam_pos = torch.tensor([0., 0., 0.])[None, None, :]
         self.cam_pos = nn.Parameter(cam_pos, requires_grad=False)
 
-    def forward(self, render_buffer, num_samples=512, train=True):
+    def forward(self, render_buffer, num_samples=256):
         
         view_pos = render_buffer['view_pos_gt']                                                                                 # [B,H,W]
         hdri_map = render_buffer['hdri_gt']                                                                                     # [B,env_h,env_w,3]

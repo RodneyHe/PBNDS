@@ -14,6 +14,8 @@ def main(exp_name, data_folder, output_folder, weight_path):
     
     if weight_path is not None:
         pretrained_weights = torch.load(os.path.join(weight_path, 'NeuralRenderer.pth'))
+    else:
+        pretrained_weights = None
     
     trainer = Trainer(exp_name=exp_name,
                       data_folder=data_folder,

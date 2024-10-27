@@ -19,16 +19,12 @@ from utils import general
 
 from torchmetrics.functional.image import peak_signal_noise_ratio
 
-def collate_fn(data):
-        
-    return data
-
 class Trainer(object):
     def __init__(self, exp_name, data_folder, output_folder, device, pretrained_weights=None):
         self.device = device
         self.data_folder = data_folder
         self.batch_size = 1
-        self.sample_num = 6144
+        self.sample_num = 4096
 
         # Logger setting
         output_path = output_folder + f'/{exp_name}'
@@ -62,6 +58,7 @@ class Trainer(object):
         # Training setting
         self.num_epoch = 0
         self.total_epochs = 3000
+        self.num_samples = 128
     
     def train(self):
         
@@ -101,39 +98,40 @@ class Trainer(object):
 
             train_data_buffer = next(train_iter)
             
-            # Data propcessing
-            for key in train_data_buffer:
-                train_data_buffer[key] = train_data_buffer[key].to(self.device)
-            
             # Random sampling pixels
-            mask_gt = train_data_buffer['mask_gt']
-            rgb_gt = train_data_buffer['rgb_gt']
+            mask_gt = train_data_buffer['mask_gt'].to(self.device)
+            rgb_gt = train_data_buffer['rgb_gt'].to(self.device)
+            albedo_gt = train_data_buffer['albedo_gt'].to(self.device)
+            roughness_gt = train_data_buffer['roughness_gt'].to(self.device)
+            specular_gt = train_data_buffer['specular_gt'].to(self.device)
+            normal_gt = train_data_buffer['normal_gt'].to(self.device)
+            
             num_all_training_pixels = rgb_gt[mask_gt].shape[0]
-            rand_indices = torch.randperm(num_all_training_pixels)[:self.sample_num]
+            rand_indices = torch.randperm(num_all_training_pixels)[:self.sample_num].to(self.device)
             
             # Loss calculation
             if step % 10 == 0:
                 render_buffer = {
                     'rgb_gt': rgb_gt[mask_gt],
-                    'normal_gt': train_data_buffer['normal_gt'][mask_gt],
-                    'albedo_gt': train_data_buffer['albedo_gt'][mask_gt],
-                    'roughness_gt': train_data_buffer['roughness_gt'][mask_gt],
-                    'specular_gt': train_data_buffer['specular_gt'][mask_gt],
-                    'view_pos_gt': train_data_buffer['view_pos_gt'][mask_gt],
-                    'hdri_gt': train_data_buffer['hdri_gt']
+                    'normal_gt': normal_gt[mask_gt],
+                    'albedo_gt': albedo_gt[mask_gt],
+                    'roughness_gt': roughness_gt[mask_gt],
+                    'specular_gt': specular_gt[mask_gt],
+                    'view_pos_gt': train_data_buffer['view_pos_gt'].to(self.device)[mask_gt],
+                    'hdri_gt': train_data_buffer['hdri_gt'].to(self.device)
                 }
             else:
                 render_buffer = {
                     'rgb_gt': rgb_gt[mask_gt][rand_indices],
-                    'normal_gt': train_data_buffer['normal_gt'][mask_gt][rand_indices],
-                    'albedo_gt': train_data_buffer['albedo_gt'][mask_gt][rand_indices],
-                    'roughness_gt': train_data_buffer['roughness_gt'][mask_gt][rand_indices],
-                    'specular_gt': train_data_buffer['specular_gt'][mask_gt][rand_indices],
-                    'view_pos_gt': train_data_buffer['view_pos_gt'][mask_gt][rand_indices],
-                    'hdri_gt': train_data_buffer['hdri_gt']
+                    'normal_gt': normal_gt[mask_gt][rand_indices],
+                    'albedo_gt': albedo_gt[mask_gt][rand_indices],
+                    'roughness_gt': roughness_gt[mask_gt][rand_indices],
+                    'specular_gt': specular_gt[mask_gt][rand_indices],
+                    'view_pos_gt': train_data_buffer['view_pos_gt'].to(self.device)[mask_gt][rand_indices],
+                    'hdri_gt': train_data_buffer['hdri_gt'].to(self.device)
                 }
             
-            rgb_rec = self.neural_render(render_buffer, num_samples=128)
+            rgb_rec = self.neural_render(render_buffer=render_buffer, num_samples=self.num_samples)
             
             # Reconstruction loss
             rec_loss = self.rec_loss_fn(rgb_rec, render_buffer['rgb_gt'])
@@ -165,15 +163,24 @@ class Trainer(object):
             
             # Visualize train result
             if step == 0:
-                vis_image = torch.cat([rec_image[0], rgb_gt[0]], dim=1)
+                
+                vis_normal = (normal_gt[0] + 1) / 2
+                
+                vis_image = torch.cat([albedo_gt[0], 
+                                       roughness_gt[0][...,None].repeat(1,1,3), 
+                                       specular_gt[0][...,None].repeat(1,1,3), 
+                                       vis_normal, 
+                                       rec_image[0], 
+                                       rgb_gt[0]], dim=1)
+                
+                
                 tvf.to_pil_image(vis_image.permute(2,0,1)).save(self.images_dir + f"/train_e{self.num_epoch}_s{step}.png")
     
     def eval_epoch(self):
         
         eval_loader = iter(self.eval_loader)
         
-        render_ouputs = []
-        gt_outputs = []
+        vis_outputs = []
         mse_metric_list = []
         psnr_metric_list = []
         self.neural_render.eval()
@@ -183,29 +190,40 @@ class Trainer(object):
             eval_data_buffer = next(eval_loader)
             
             # Input data process
-            mask_gt = eval_data_buffer['mask_gt']
+            mask_gt = eval_data_buffer['mask_gt'].to(self.device)
+            rgb_gt = eval_data_buffer['rgb_gt'].to(self.device)
+            albedo_gt = eval_data_buffer['albedo_gt'].to(self.device)
+            roughness_gt = eval_data_buffer['roughness_gt'].to(self.device)
+            specular_gt = eval_data_buffer['specular_gt'].to(self.device)
+            normal_gt = eval_data_buffer['normal_gt'].to(self.device)
+            
             render_buffer = {
-                'rgb_gt': eval_data_buffer['rgb_gt'][mask_gt].to(self.device),
-                'normal_gt': eval_data_buffer['normal_gt'][mask_gt].to(self.device),
-                'albedo_gt': eval_data_buffer['albedo_gt'][mask_gt].to(self.device),
-                'roughness_gt': eval_data_buffer['roughness_gt'][mask_gt].to(self.device),
-                'specular_gt': eval_data_buffer['specular_gt'][mask_gt].to(self.device),
-                'view_pos_gt': eval_data_buffer['view_pos_gt'][mask_gt].to(self.device),
+                'rgb_gt': rgb_gt[mask_gt],
+                'normal_gt': normal_gt[mask_gt],
+                'albedo_gt': albedo_gt[mask_gt],
+                'roughness_gt': roughness_gt[mask_gt],
+                'specular_gt': specular_gt[mask_gt],
+                'view_pos_gt': eval_data_buffer['view_pos_gt'].to(self.device)[mask_gt],
                 'hdri_gt': eval_data_buffer['hdri_gt'].to(self.device)
             }
             
-            rgb_rec = self.neural_render(render_buffer)
+            rgb_rec = self.neural_render(render_buffer=render_buffer, num_samples=self.num_samples)
             
             # Restore the image resolution
             rec_image = torch.zeros(1,128,128,3).to(self.device)
             rec_image[mask_gt] = rgb_rec
-            
-            render_ouputs.append(rec_image[0])
 
             # Metrics calculation
-            rgb_gt = eval_data_buffer['rgb_gt'].to(self.device)
-            gt_outputs.append(rgb_gt[0])
+            vis_normal = (normal_gt[0] + 1) / 2
             
+            vis_image = torch.cat([rgb_gt[0], 
+                                   rec_image[0], 
+                                   albedo_gt[0], 
+                                   roughness_gt[0][...,None].repeat(1,1,3), 
+                                   specular_gt[0][...,None].repeat(1,1,3), 
+                                   vis_normal], dim=0)
+            
+            vis_outputs.append(vis_image)
             mse_metric = torch.nn.functional.mse_loss(rgb_rec, rgb_gt[mask_gt])
             psnr_metric = peak_signal_noise_ratio(rgb_rec, rgb_gt[mask_gt])
             
@@ -216,9 +234,7 @@ class Trainer(object):
         mean_mse = torch.stack(mse_metric_list).mean()
         mean_psnr = torch.stack(psnr_metric_list, dim=0).mean()
         
-        render_outputs = torch.cat(render_ouputs[:5], dim=1)
-        gt_outputs = torch.cat(gt_outputs[:5], dim=1)
-        image_outputs = torch.cat([render_outputs, gt_outputs], dim=0)
+        image_outputs = torch.cat(vis_outputs[:5], dim=1)
 
         Writer.add_scalar("test/MSE", mean_mse, self.num_epoch)
         Writer.add_scalar("test/PSNR", mean_psnr, self.num_epoch)
@@ -232,25 +248,3 @@ class Trainer(object):
         #lr = base_lr * (0.1 ** (epoch // 10))
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-    
-if __name__ == '__main__':
-    
-    parser = argparse.ArgumentParser()
-    
-    # train options
-    parser.add_argument('exp_name', type=str)
-    parser.add_argument('--data_folder', type=str)
-    parser.add_argument('--output_folder', type=str)
-    parser.add_argument('--config_path', type=str)
-    
-    args = parser.parse_args()
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    trainer = Trainer(exp_name=args.exp_name,
-                      data_folder=args.data_folder,
-                      output_folder=args.output_folder,
-                      neilf_config_path=args.config_path,
-                      device=device)
-    
-    trainer.train()

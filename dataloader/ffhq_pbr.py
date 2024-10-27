@@ -57,7 +57,7 @@ class FFHQPBR(Dataset):
         rgb_gt = self.load_sdr(os.path.join(self.rgb_gt_path, f'{subfolder:05}/{file_index}.png'))
         rgb_gt = rgb_gt / 255.
         normal_gt = self.load_sdr(os.path.join(self.normal_gt_path, f'{subfolder:05}/normal_{file_index}.png'))
-        normal_gt = ((normal_gt / 255.) * 2 -1.).to(torch.float32)
+        normal_gt = ((normal_gt / 255.) * 2 - 1.).to(torch.float32)
         albedo_gt = self.load_sdr(os.path.join(self.albedo_gt_path, f'{subfolder:05}/albedo_{file_index}.png'))
         albedo_gt = albedo_gt / 255.
         roughness_gt = self.load_sdr(os.path.join(self.roughness_gt_path, f'{subfolder:05}/roughness_{file_index}.png'))
@@ -116,9 +116,11 @@ class FFHQPBR(Dataset):
                 alpha_factor = np.concatenate((alpha_factor,alpha_factor,alpha_factor), axis=2)
 
                 # Transparent Image Rendered on White Background
-                base = (rgb_channels * alpha_factor).astype(np.uint8)
-                background = (background_image * (1 - alpha_factor)).astype(np.uint8)
+                base = rgb_channels * alpha_factor
+                background = background_image * (1 - alpha_factor)
                 image = base + background
+            else:
+                image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
         
         image = cv.resize(image, (self.width, self.height), interpolation=cv.INTER_NEAREST)
         
