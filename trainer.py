@@ -184,7 +184,7 @@ class Trainer(object):
         mse_metric_list = []
         psnr_metric_list = []
         self.neural_render.eval()
-        pbar = tqdm(range(50), ncols=80)
+        pbar = tqdm(range(100), ncols=80)
         for _ in pbar:
             
             eval_data_buffer = next(eval_loader)

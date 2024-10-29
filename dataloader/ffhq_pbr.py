@@ -8,11 +8,10 @@ import torch
 from torch.utils.data import Dataset
 
 class FFHQPBR(Dataset):
-    def __init__(self, data_path, eval_rate=0.1, random_seed=0, mode=None, stage='1'):
+    def __init__(self, data_path, eval_rate=0.1, random_seed=0, mode=None):
         super().__init__()
         
         self.width, self.height = 128, 128
-        self.stage = stage
         self.mode = mode
         torch.manual_seed(random_seed)
         
@@ -31,9 +30,9 @@ class FFHQPBR(Dataset):
         train_num = round(self.dataset_length * (1 - eval_rate))
         
         if mode == 'train':
-            self.train_list = self.gt_indices_list[:train_num]
+            self.data_list = self.gt_indices_list[:train_num]
         elif mode == 'eval':
-            self.eval_list = self.gt_indices_list[train_num:]
+            self.data_list = self.gt_indices_list[train_num:]
     
     def _get_meta_data_list(self):
         
@@ -47,11 +46,11 @@ class FFHQPBR(Dataset):
         return gt_indices_list
     
     def __len__(self):
-        return self.dataset_length
+        return len(self.data_list)
     
     def __getitem__(self, index):
         
-        file_index = self.gt_indices_list[index]
+        file_index = self.data_list[index]
         subfolder = int(file_index) // 1000 * 1000
         
         rgb_gt = self.load_sdr(os.path.join(self.rgb_gt_path, f'{subfolder:05}/{file_index}.png'))
