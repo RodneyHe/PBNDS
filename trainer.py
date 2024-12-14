@@ -1,9 +1,5 @@
-import os
-os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
-
-import json
-import argparse
 from tqdm import tqdm
+import math
 
 # load pytorch
 import torch
@@ -12,19 +8,25 @@ from torch.utils.data.dataloader import DataLoader
 
 from writer import Writer
 from models.neural_renderer import NeuralRenderer
-from models.perceptual_loss import PerceptualLoss
+from models.unet import UNet128
+#from models.perceptual_loss import PerceptualLoss
 
 from dataloader.ffhq_pbr import FFHQPBR
-from utils import general
 
 from torchmetrics.functional.image import peak_signal_noise_ratio
 
 class Trainer(object):
-    def __init__(self, exp_name, data_folder, output_folder, device, pretrained_weights=None):
-        self.device = device
+    def __init__(self, exp_name, data_folder, output_folder, configs, pretrained_weights):
+        
+        # Set the training configs
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.data_folder = data_folder
-        self.batch_size = 1
-        self.sample_num = 4096
+        #self.batch_size = configs['train']['batch_size']
+        self.crop_size = configs['train']['crop_size']
+        self.total_epochs = configs['train']['total_epochs']
+        self.cross_rate = configs['train']['cross_rate']
+        self.num_pixel_samples = configs['train']['num_pixel_samples']
+        self.num_light_samples = configs['train']['num_light_samples']
 
         # Logger setting
         output_path = output_folder + f'/{exp_name}'
@@ -34,7 +36,7 @@ class Trainer(object):
 
         # Data loader setting
         train_dataset = FFHQPBR(data_path=data_folder, mode='train')
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, 
+        self.train_loader = DataLoader(train_dataset, batch_size=1, 
                                        shuffle=True, num_workers=4, pin_memory=True)
         
         eval_dataset = FFHQPBR(data_path=data_folder, mode='eval')
@@ -43,24 +45,29 @@ class Trainer(object):
         
         # Load model
         neural_render = NeuralRenderer()
-        self.neural_render = neural_render.to(device)
+        self.neural_render = neural_render.to(self.device)
+        
+        shadow_estimator = UNet128(in_chns=3, out_chns=1)
+        self.shadow_estimator = shadow_estimator.to(self.device)
         
         if pretrained_weights is not None:
             self.neural_render.load_state_dict(pretrained_weights)
         
         # Optimizer setting
-        self.adam_optimizer = torch.optim.Adam(params=self.neural_render.parameters(), lr=5e-5)
+        self.adam_optimizer = torch.optim.Adam(params=[{'params': self.neural_render.parameters()},
+                                                       {'params': self.shadow_estimator.parameters()}], 
+                                               lr=configs['train']['initial_lr'])
+        #self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.adam_optimizer)
         
         # Loss function
         self.rec_loss_fn = torch.nn.L1Loss()
-        self.perc_loss_fn = PerceptualLoss()
-
-        # Training setting
-        self.num_epoch = 0
-        self.total_epochs = 3000
-        self.num_samples = 128
+        self.shd_loss_fn = torch.nn.MSELoss()
+        #self.perc_loss_fn = PerceptualLoss()
     
     def train(self):
+        
+        # Initialize training loop
+        self.num_epoch = 0
         
         # Main loop
         while True:
@@ -68,16 +75,19 @@ class Trainer(object):
             
             # Dynanmically change the learning rate
             if self.num_epoch >= 50:
-                self.adjust_learning_rate(self.shader_optimizer, 2e-5)
+                self.adjust_learning_rate(self.adam_optimizer, 2e-5)
             elif self.num_epoch >= 100:
-                self.adjust_learning_rate(self.shader_optimizer, 5e-6)
+                self.adjust_learning_rate(self.adam_optimizer, 5e-6)
             elif self.num_epoch >= 200:
-                self.adjust_learning_rate(self.shader_optimizer, 2e-6)
+                self.adjust_learning_rate(self.adam_optimizer, 2e-6)
             elif self.num_epoch >= 300:
-                self.adjust_learning_rate(self.shader_optimizer, 1e-6)
+                self.adjust_learning_rate(self.adam_optimizer, 1e-6)
             
             # Train epoch
-            self.train_epoch()
+            if self.num_epoch % self.cross_rate == 0:
+                self.train_epoch(cross=True)
+            else:
+                self.train_epoch(cross=False)
             
             # Evaluation epoch
             with torch.no_grad():
@@ -88,93 +98,118 @@ class Trainer(object):
             
             self.num_epoch += 1
 
-    def train_epoch(self):
+    def train_epoch(self, cross=False):
 
         train_iter = iter(self.train_loader)
         
         self.neural_render.train()
         pbar = tqdm(range(len(train_iter)), ncols=80)
         for step in pbar:
-
+            
+            # Load training data
             train_data_buffer = next(train_iter)
             
-            # Random sampling pixels
             mask_gt = train_data_buffer['mask_gt'].to(self.device)
             rgb_gt = train_data_buffer['rgb_gt'].to(self.device)
             albedo_gt = train_data_buffer['albedo_gt'].to(self.device)
             roughness_gt = train_data_buffer['roughness_gt'].to(self.device)
             specular_gt = train_data_buffer['specular_gt'].to(self.device)
             normal_gt = train_data_buffer['normal_gt'].to(self.device)
+            view_pos_gt = train_data_buffer['view_pos_gt'].to(self.device)
+            hdri_gt = train_data_buffer['hdri_gt'].to(self.device)
             
+            # Random sampling training pixels
             num_all_training_pixels = rgb_gt[mask_gt].shape[0]
-            rand_indices = torch.randperm(num_all_training_pixels)[:self.sample_num].to(self.device)
+            rand_indices = torch.randperm(num_all_training_pixels, device=self.device)[:self.num_pixel_samples]
             
             # Loss calculation
-            if step % 10 == 0:
-                render_buffer = {
-                    'rgb_gt': rgb_gt[mask_gt],
-                    'normal_gt': normal_gt[mask_gt],
-                    'albedo_gt': albedo_gt[mask_gt],
-                    'roughness_gt': roughness_gt[mask_gt],
-                    'specular_gt': specular_gt[mask_gt],
-                    'view_pos_gt': train_data_buffer['view_pos_gt'].to(self.device)[mask_gt],
-                    'hdri_gt': train_data_buffer['hdri_gt'].to(self.device)
-                }
-            else:
+            # if step % 10 == 0:
+            #     render_buffer = {
+            #         'rgb_gt': rgb_gt[mask_gt],
+            #         'normal_gt': normal_gt[mask_gt],
+            #         'albedo_gt': albedo_gt[mask_gt],
+            #         'roughness_gt': roughness_gt[mask_gt],
+            #         'specular_gt': specular_gt[mask_gt],
+            #         'view_pos_gt': view_pos_gt[mask_gt],
+            #         'hdri_gt': hdri_gt
+            #     }
+            # else:
+            #     render_buffer = {
+            #         'rgb_gt': rgb_gt[mask_gt][rand_indices],
+            #         'normal_gt': normal_gt[mask_gt][rand_indices],
+            #         'albedo_gt': albedo_gt[mask_gt][rand_indices],
+            #         'roughness_gt': roughness_gt[mask_gt][rand_indices],
+            #         'specular_gt': specular_gt[mask_gt][rand_indices],
+            #         'view_pos_gt': view_pos_gt[mask_gt][rand_indices],
+            #         'hdri_gt': hdri_gt
+            #     }
+            
+            if not cross:
+                
                 render_buffer = {
                     'rgb_gt': rgb_gt[mask_gt][rand_indices],
                     'normal_gt': normal_gt[mask_gt][rand_indices],
                     'albedo_gt': albedo_gt[mask_gt][rand_indices],
                     'roughness_gt': roughness_gt[mask_gt][rand_indices],
                     'specular_gt': specular_gt[mask_gt][rand_indices],
-                    'view_pos_gt': train_data_buffer['view_pos_gt'].to(self.device)[mask_gt][rand_indices],
-                    'hdri_gt': train_data_buffer['hdri_gt'].to(self.device)
+                    'view_pos_gt': view_pos_gt[mask_gt][rand_indices],
+                    'hdri_gt': hdri_gt
                 }
-            
-            rgb_rec = self.neural_render(render_buffer=render_buffer, num_samples=self.num_samples)
-            
-            # Reconstruction loss
-            rec_loss = self.rec_loss_fn(rgb_rec, render_buffer['rgb_gt'])
-            
-            # Perceptual loss
-            if step % 10 == 0:
-                rec_image = torch.zeros(1,128,128,3).to(self.device)
-                rec_image[mask_gt] = rgb_rec
                 
-                perc_loss = self.perc_loss_fn(rec_image.permute(0,3,1,2), 
-                                              rgb_gt.permute(0,3,1,2), 
-                                              mask_gt[...,None].permute(0,3,1,2), 
-                                              layers=[2])
+                rgb_rec = self.neural_render(render_buffer=render_buffer, num_light_samples=self.num_light_samples)
+                
+                # Reconstruction loss
+                rec_loss = self.rec_loss_fn(rgb_rec, render_buffer['rgb_gt'])
                 
             else:
-                perc_loss = torch.tensor([0.]).to(self.device)
+                with torch.no_grad():
+                    
+                    render_buffer = {
+                        'rgb_gt': rgb_gt[mask_gt],
+                        'normal_gt': normal_gt[mask_gt],
+                        'albedo_gt': albedo_gt[mask_gt],
+                        'roughness_gt': roughness_gt[mask_gt],
+                        'specular_gt': specular_gt[mask_gt],
+                        'view_pos_gt': view_pos_gt[mask_gt],
+                        'hdri_gt': hdri_gt
+                    }
+                    
+                    rgb_rec = self.neural_render(render_buffer=render_buffer, num_light_samples=self.num_light_samples)
             
-            total_loss = rec_loss + perc_loss
+                B, H, W, C =  rgb_gt.shape
+                rec_image = torch.zeros(B, H, W, C, device=self.device)
+                rec_image[mask_gt] = rgb_rec
+            
+                shadow_map = self.shadow_estimator(rec_image.permute(0,3,1,2)).permute(0,2,3,1)
+            
+                # Reconstruction loss
+                rec_loss = self.rec_loss_fn(rec_image*shadow_map, rgb_gt)
 
-            if rec_loss.item() != 0:
+            if rec_loss.item() is not None:
                 self.adam_optimizer.zero_grad()
-                total_loss.backward()
+                rec_loss.backward()
                 self.adam_optimizer.step()
 
             # Log loss
-            Writer.add_scalar("train/total_loss", total_loss.item(), step=(step+self.num_epoch*len(self.train_loader)))
-            Writer.add_scalar("train/rec_loss", rec_loss.item(), step=(step+self.num_epoch*len(self.train_loader)))
-            Writer.add_scalar("train/perc_loss", perc_loss.item(), step=(step+self.num_epoch*len(self.train_loader)))
+            Writer.add_scalar("train/total_loss", rec_loss.item(), step=(step+self.num_epoch*len(self.train_loader)))
             
             # Visualize train result
-            if step == 0:
+            # if step == 0:
                 
-                vis_normal = (normal_gt[0] + 1) / 2
+            #     B, H, W, C =  rgb_gt.shape
                 
-                vis_image = torch.cat([albedo_gt[0], 
-                                       roughness_gt[0][...,None].repeat(1,1,3), 
-                                       specular_gt[0][...,None].repeat(1,1,3), 
-                                       vis_normal, 
-                                       rec_image[0], 
-                                       rgb_gt[0]], dim=1)
+            #     rec_image = torch.zeros(B, H, W, C, device=self.device)
+            #     rec_image[mask_gt] = rgb_rec
+                
+            #     vis_image = torch.cat([albedo_gt[0], 
+            #                            roughness_gt[0][...,None].repeat(1,1,3), 
+            #                            specular_gt[0][...,None].repeat(1,1,3), 
+            #                            (normal_gt[0]+1)/2, 
+            #                            rec_image[0], 
+            #                            rgb_gt[0]], dim=1)
                 
                 
-                tvf.to_pil_image(vis_image.permute(2,0,1)).save(self.images_dir + f"/train_e{self.num_epoch}_s{step}.png")
+            #     tvf.to_pil_image(vis_image.permute(2,0,1)).save(self.images_dir + f"/train_e{self.num_epoch}_s{step}.png")
     
     def eval_epoch(self):
         
@@ -196,6 +231,8 @@ class Trainer(object):
             roughness_gt = eval_data_buffer['roughness_gt'].to(self.device)
             specular_gt = eval_data_buffer['specular_gt'].to(self.device)
             normal_gt = eval_data_buffer['normal_gt'].to(self.device)
+            view_pos_gt = eval_data_buffer['view_pos_gt'].to(self.device)
+            hdri_gt = eval_data_buffer['hdri_gt'].to(self.device)
             
             render_buffer = {
                 'rgb_gt': rgb_gt[mask_gt],
@@ -203,29 +240,33 @@ class Trainer(object):
                 'albedo_gt': albedo_gt[mask_gt],
                 'roughness_gt': roughness_gt[mask_gt],
                 'specular_gt': specular_gt[mask_gt],
-                'view_pos_gt': eval_data_buffer['view_pos_gt'].to(self.device)[mask_gt],
-                'hdri_gt': eval_data_buffer['hdri_gt'].to(self.device)
+                'view_pos_gt': view_pos_gt[mask_gt],
+                'hdri_gt': hdri_gt
             }
             
-            rgb_rec = self.neural_render(render_buffer=render_buffer, num_samples=self.num_samples)
+            rgb_rec = self.neural_render(render_buffer=render_buffer, num_light_samples=self.num_light_samples)
             
             # Restore the image resolution
             rec_image = torch.zeros(1,128,128,3).to(self.device)
             rec_image[mask_gt] = rgb_rec
+            
+            # Shadow map generation
+            shadow_map = self.shadow_estimator(torch.cat([rec_image, normal_gt], dim=-1).permute(0,3,1,2)).permute(0,2,3,1)
 
             # Metrics calculation
             vis_normal = (normal_gt[0] + 1) / 2
             
             vis_image = torch.cat([rgb_gt[0], 
-                                   rec_image[0], 
+                                   (rec_image*shadow_map)[0], 
+                                   shadow_map[0].repeat(1,1,3),
                                    albedo_gt[0], 
                                    roughness_gt[0][...,None].repeat(1,1,3), 
                                    specular_gt[0][...,None].repeat(1,1,3), 
                                    vis_normal], dim=0)
             
             vis_outputs.append(vis_image)
-            mse_metric = torch.nn.functional.mse_loss(rgb_rec, rgb_gt[mask_gt])
-            psnr_metric = peak_signal_noise_ratio(rgb_rec, rgb_gt[mask_gt])
+            mse_metric = torch.nn.functional.mse_loss(rgb_rec*shadow_map[mask_gt], rgb_gt[mask_gt])
+            psnr_metric = peak_signal_noise_ratio(rgb_rec*shadow_map[mask_gt], rgb_gt[mask_gt])
             
             mse_metric_list.append(mse_metric)
             psnr_metric_list.append(psnr_metric)
@@ -241,6 +282,7 @@ class Trainer(object):
         
         tvf.to_pil_image(image_outputs.permute(2,0,1)).save(self.images_dir + f"/test_e{self.num_epoch}.png")
         self.neural_render.save_model(weights_dir=self.weights_dir)
+        torch.save(self.shadow_estimator.state_dict(), self.weights_dir + '/ShadowEstimator.pth')
 
     # Helper function
     def adjust_learning_rate(self, optimizer, lr):

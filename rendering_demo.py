@@ -47,4 +47,3 @@ rasterizer = MeshRasterizer(cameras=cameras, raster_settings=rasterizer_settings
 
 # Rendering
 fragments = rasterizer(lego_mesh_world)
-

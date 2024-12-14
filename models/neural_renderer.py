@@ -1,13 +1,7 @@
-import math
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-
-import numpy as np
-
 import torch
 import torch.nn as nn
 
-import torchvision.transforms.functional as tvf
+import numpy as np
 
 from .neural_shader import NeuralShader
 
@@ -41,13 +35,13 @@ class NeuralRenderer(nn.Module):
         cam_pos = torch.tensor([0., 0., 0.])[None, None, :]
         self.cam_pos = nn.Parameter(cam_pos, requires_grad=False)
 
-    def forward(self, render_buffer, num_samples=256):
+    def forward(self, render_buffer, num_light_samples):
         
         view_pos = render_buffer['view_pos_gt']                                                                                 # [B,H,W]
         hdri_map = render_buffer['hdri_gt']                                                                                     # [B,env_h,env_w,3]
         
-        # Sampling the HDRi environment map
-        sampled_hdri_map, sampled_direction = self.uniform_sampling(hdri_map=hdri_map, num_samples=num_samples)
+        # Sampling the HDRi environment map, getting sampled light and inbound direction
+        sampled_hdri_map, sampled_direction = self.uniform_sampling(hdri_map=hdri_map, num_samples=num_light_samples)
         
         # Calculate outbound direction
         in_dirs = sampled_direction.repeat(view_pos.shape[0],1,1)                                                               # [S,N,3]
@@ -63,19 +57,42 @@ class NeuralRenderer(nn.Module):
             'out_dirs': out_dirs.broadcast_to(in_dirs.shape),                                                                   # [S,N,3]
             'hdri_samples': sampled_hdri_map.broadcast_to(in_dirs.shape)                                                        # [S,N,3]
         }
-        shading_buffer = self.split_model_inputs(input=shading_input, total_pixels=in_dirs.shape[1], split_size=1000)
         
-        shading_output = []
-        for split_buffer in shading_buffer:
-            shading_output.append(self.shader(**split_buffer))
-        
-        masked_rgb_pixels = torch.cat(shading_output, dim=1)
+        masked_rgb_pixels = self.shader(**shading_input)
 
         return masked_rgb_pixels
     
+    def uniform_sampling(self, hdri_map, num_samples):
+        
+        B, height, width, _ = hdri_map.shape
+        
+        # Uniformly sampling theta (elevation angle), range [0, 2*pi]
+        phi = 2 * torch.pi * torch.rand(B, num_samples).to(hdri_map.device)
+        
+        # Uniformly sample phi (azimuth angle), range [0, pi]
+        theta = torch.acos(2 * torch.rand(B, num_samples) - 1).to(hdri_map.device)
+        
+        # Convert spherical coordinates to Cartesian coordinates 
+        x = torch.sin(theta) * torch.cos(phi)
+        y = torch.cos(theta)
+        z = torch.sin(theta) * torch.sin(phi)
+
+        # Form the direction vector
+        sampled_direction = torch.cat([x[...,None], y[...,None], z[...,None]], dim=-1)
+        sampled_direction = torch.nn.functional.normalize(sampled_direction, dim=-1)
+        
+        # Mapping (phi, theta) to pixel coordinates of an equirectangular environment map
+        u = ((phi / (2 * torch.pi)) * (width-1)).long()
+        v = ((theta / torch.pi) * (height-1)).long()
+        
+        batch_indices = torch.arange(B).reshape(-1, 1).expand_as(u)
+        sampled_hdri_map = hdri_map[batch_indices, v, u]
+        
+        return sampled_hdri_map, sampled_direction
+    
     def importance_sampling(self, hdri_map, num_samples):
         
-        # 1. 预处理HDRI，生成CDF
+        # 1. Preprocess HDRI, generating CDF
         # 计算亮度（例如，使用RGB通道的加权和）(Rec. 709 or sRGB color space)
         luminance = 0.2126 * hdri_map[:,:,:,0] + 0.7152 * hdri_map[:,:,:,1] + 0.0722 * hdri_map[:,:,:,2]
 
@@ -123,33 +140,6 @@ class NeuralRenderer(nn.Module):
         # Sampling the hdri environment map
         sampled_hdri_map = hdri_map[batch_indices, v, u]
         sampled_hdri_map = sampled_hdri_map / pdf[...,None]
-        
-        return sampled_hdri_map, sampled_direction
-    
-    def uniform_sampling(self, hdri_map, num_samples):
-        
-        B, height, width, _ = hdri_map.shape
-        
-        # 生成均匀分布的phi角（纬度角），范围 [0, pi]
-        theta = torch.acos(1 - torch.rand(B, num_samples).to(hdri_map.device))
-        
-        # 生成均匀分布的theta角（经度角），范围 [0, 2*pi]
-        phi = 2 * torch.pi * torch.rand(B, num_samples).to(hdri_map.device)
-        
-        # 将球面坐标转换为方向向量
-        x = torch.sin(theta) * torch.cos(phi)
-        y = torch.cos(theta)
-        z = torch.sin(theta) * torch.sin(phi)
-
-        sampled_direction = torch.cat([x[...,None], y[...,None], z[...,None]], dim=-1)
-        sampled_direction = torch.nn.functional.normalize(sampled_direction, dim=-1)
-        
-        # 将theta和phi映射到图像的像素坐标
-        u = ((phi / (2 * torch.pi)) * width - 0.5).int()
-        v = ((theta / torch.pi) * height - 0.5).int()
-        
-        batch_indices = torch.arange(B).reshape(-1, 1).expand_as(u)
-        sampled_hdri_map = hdri_map[batch_indices, v, u]
         
         return sampled_hdri_map, sampled_direction
 
@@ -203,6 +193,67 @@ class NeuralRenderer(nn.Module):
 
         return pdf[...,None]
     
+    # Classical renderer
+    def v_schlick_ggx(self, roughness, cos):
+        '''
+        Geometry term V, V = G / (4 * cos * cos), schlick ggx
+        '''
+        r2 = ((1 + roughness) ** 2) / 8
+        return 0.5 / (cos * (1 - r2) + r2).clamp(min=1e-2)
+
+    def d_sg(self, roughness, cos):
+        r2 = (roughness * roughness).clamp(min=1e-2)
+        amp = 1 / (r2 * torch.pi)
+        sharp = 2 / r2
+        return amp * torch.exp(sharp * (cos - 1))
+    
+    def ggx_shader(self, albedo, roughness, metallic, normal, out_dirs, in_dirs, light, mask=None):
+        
+        b, h, w, _ = albedo.shape
+        
+        albedo = albedo.reshape(b, h*w, 1, 3)
+        roughness = roughness.reshape(b, h*w, 1, 1)
+        metallic = metallic.reshape(b, h*w, 1, 1)
+        normal = normal.reshape(b, h*w, 1, 3)
+        in_dirs = in_dirs.reshape(b, h*w, self.env_height*self.env_width, 3)
+        out_dirs = out_dirs.reshape(b, h*w, 1, 3)
+        
+        # Repeat light for multiple pixels for sharing
+        light = light.repeat_interleave(2, dim=1)
+        light = light.repeat_interleave(2, dim=2)
+        light = light.reshape(b,h*w,self.env_height*self.env_width,3)
+        #mask = mask.reshape(b, h*w, 1)
+        
+        # Diffuse BRDF
+        diffuse_brdf = (1 - metallic) * albedo / torch.pi
+        
+        # Diffuse BRDF
+        half_dirs = in_dirs + out_dirs
+        half_dirs = nn.functional.normalize(half_dirs, dim=-1)
+        h_d_n = (half_dirs * normal).sum(dim=-1, keepdim=True).clamp(min=0)
+        h_d_o = (half_dirs * out_dirs).sum(dim=-1, keepdim=True).clamp(min=0)
+        n_d_i = (normal * in_dirs).sum(dim=-1, keepdim=True).clamp(min=0)
+        n_d_o = (normal * out_dirs).sum(dim=-1, keepdim=True).clamp(min=0)
+        
+        # Fresnel term F (Schlick Approximation)
+        F0 = 0.04 * (1 - metallic) + albedo * metallic
+        F = F0 + (1. - F0) * ((1. - h_d_o) ** 5)
+        
+        # Geometry term with Smiths Approximation
+        V = self.v_schlick_ggx(roughness, n_d_i) * self.v_schlick_ggx(roughness, n_d_o)
+        
+        # Normal distributed function (SG)
+        D = self.d_sg(roughness, h_d_n).clamp(max=1)
+        
+        specular_brdf = D * F * V 
+        
+        # RGB color shading
+        incident_area = torch.ones_like(light) * 2 * torch.pi
+        render_output = ((diffuse_brdf + specular_brdf) * light * incident_area * n_d_i).mean(dim=2)
+        
+        return render_output.reshape(b,h,w,-1).clamp(0.,1.)
+    
+    # Utility function
     def split_model_inputs(self, input, total_pixels, split_size):
         '''
         Split the input to fit Cuda memory for large resolution.

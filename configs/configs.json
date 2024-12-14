@@ -1,12 +1,16 @@
 {
     "model": {
         "use_ldr_image": false,
-        "resolution": [1024, 1024]
+        "resolution": [128, 128]
     },
     "train": {
+        "batch_size": 1,
+        "crop_size": null,
         "num_pixel_samples": 8192,
-        "training_iterations": 30000,
-        "lr": 0.001
+        "num_light_samples": 128,
+        "initial_lr": 5e-5,
+        "total_epochs": 40,
+        "cross_rate": 2
     },
     "evaluation": {
         "validation_indexes": [

@@ -1,10 +1,10 @@
 from typing import List
-import random
 import torch
 import torch.nn as nn
 
 import numpy as np
 
+from .gfft import GaussianFourierFeatureTransform
 from .positional_embedder import get_embedder
 
 class Sine(nn.Module):
@@ -184,21 +184,38 @@ class NeuralShader(nn.Module):
                  fourier_features="positional",
                  mapping_size=256,
                  fft_scale=8,
-                 num_pixel_samples = 8192):
+                 device='gpu'):
         
         super().__init__()
         
-        self.num_pixel_samples = num_pixel_samples
-        self.fourier_feature_transform, channels = get_embedder(fft_scale, 8)
+        self.fourier_feature_transform = None
+        if fourier_features == "positional":
+            self.fourier_feature_transform, channels = get_embedder(fft_scale, 11)
+        elif fourier_features == "gfft":
+            self.fourier_feature_transform = GaussianFourierFeatureTransform(11, mapping_size=mapping_size//2, scale=fft_scale, device=device)
+        elif fourier_features == "none":
+            pass
+        else:
+            raise "Invalid fourier features setting. Shoud be one of 'positional', 'gfft', 'none'."
+                
+        # Diffuse Network
+        self.diffuse = FC(in_features=channels, 
+                          out_features=hidden_features_size, 
+                          hidden_features=[hidden_features_size] * hidden_features_layers, 
+                          activation=activation, 
+                          last_activation=None)
         
-        self.diffuse = FC(channels, hidden_features_size, [hidden_features_size] * hidden_features_layers, activation, None)
-        self.specular = FC(hidden_features_size+4, 3, [hidden_features_size // 2], activation, last_activation)
+        # Specular Network
+        self.specular = FC(in_features=hidden_features_size + 7, 
+                           out_features=3, 
+                           hidden_features=[hidden_features_size // 2] * hidden_features_layers, 
+                           activation=activation, 
+                           last_activation=last_activation)
     
     def forward(self, normal, albedo, roughness, specular, in_dirs, out_dirs, hdri_samples):
         
         with torch.no_grad():
-            
-            textures = torch.cat([albedo, roughness, specular], dim=-1)                                                     # [S,N,5]
+            g_buffer = torch.cat([albedo, roughness, specular, normal], dim=-1)                                             # [S,N,8]
             
             half_dirs = in_dirs + out_dirs                                                                                  # [S,N,3]
             half_dirs = torch.nn.functional.normalize(half_dirs, dim=-1)                                                    # [S,N,1]
@@ -207,12 +224,15 @@ class NeuralShader(nn.Module):
             h_d_n = (normal * half_dirs).sum(dim=-1, keepdim=True).clamp(min=0)                                             # [S,N,1]
             h_d_o = (half_dirs * out_dirs).sum(dim=-1, keepdim=True).clamp(min=0)                                           # [S,N,1]
             
-            g_buffer = torch.cat([hdri_samples, textures], -1)                                                              # [S,N,8]
+            diffuse_shading_input = torch.cat([hdri_samples * n_d_i, g_buffer], -1)                                         # [S,N,11]
+            
+            if self.fourier_feature_transform is not None:
+                diffuse_shading_input = self.fourier_feature_transform(diffuse_shading_input)
         
-        h = self.diffuse(self.fourier_feature_transform(g_buffer))
-        h = self.specular(torch.cat([h, n_d_i, n_d_o, h_d_n, h_d_o], dim=-1))
+        diffue_feature = self.diffuse(diffuse_shading_input)
+        color = self.specular(torch.cat([diffue_feature, n_d_i, n_d_o, h_d_n, h_d_o, out_dirs], dim=-1))
         
         # Calculate intergal for all incident directions
-        h = h.mean(dim=1)
+        color = color.mean(dim=1)
 
-        return h.clamp(min=0.,max=1.)
+        return color.clamp(min=0.,max=1.)
