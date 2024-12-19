@@ -4,14 +4,13 @@ import math
 # load pytorch
 import torch
 import torchvision.transforms.functional as tvf
-from torch.utils.data.dataloader import DataLoader
 
 from writer import Writer
 from models.neural_renderer import NeuralRenderer
 from models.unet import UNet128
 #from models.perceptual_loss import PerceptualLoss
 
-from dataloader.ffhq_pbr import FFHQPBR
+from dataloader.ffhq_pbr import get_dataloader
 
 from torchmetrics.functional.image import peak_signal_noise_ratio
 
@@ -35,19 +34,18 @@ class Trainer(object):
         Writer.set_writer(output_path)
 
         # Data loader setting
-        train_dataset = FFHQPBR(data_path=data_folder, mode='train')
-        self.train_loader = DataLoader(train_dataset, batch_size=1, 
-                                       shuffle=True, num_workers=4, pin_memory=True)
-        
-        eval_dataset = FFHQPBR(data_path=data_folder, mode='eval')
-        self.eval_loader = DataLoader(eval_dataset, batch_size=1, 
-                                      shuffle=True, num_workers=4, pin_memory=True)
+        self.train_loader, self.eval_loader = get_dataloader(data_folder=data_folder, 
+                                                             eval_rate=0.1, 
+                                                             random_seed=0, 
+                                                             batch_size=1, 
+                                                             shuffle=True, 
+                                                             num_workers=4)
         
         # Load model
         neural_render = NeuralRenderer()
         self.neural_render = neural_render.to(self.device)
         
-        shadow_estimator = UNet128(in_chns=3, out_chns=1)
+        shadow_estimator = UNet128(in_chns=6, out_chns=1)
         self.shadow_estimator = shadow_estimator.to(self.device)
         
         if pretrained_weights is not None:
@@ -57,12 +55,11 @@ class Trainer(object):
         self.adam_optimizer = torch.optim.Adam(params=[{'params': self.neural_render.parameters()},
                                                        {'params': self.shadow_estimator.parameters()}], 
                                                lr=configs['train']['initial_lr'])
-        #self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.adam_optimizer)
+        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.adam_optimizer, T_max=self.total_epochs)
         
         # Loss function
         self.rec_loss_fn = torch.nn.L1Loss()
         self.shd_loss_fn = torch.nn.MSELoss()
-        #self.perc_loss_fn = PerceptualLoss()
     
     def train(self):
         
@@ -74,20 +71,22 @@ class Trainer(object):
             print(f'Epoch: {self.num_epoch}')
             
             # Dynanmically change the learning rate
-            if self.num_epoch >= 50:
-                self.adjust_learning_rate(self.adam_optimizer, 2e-5)
-            elif self.num_epoch >= 100:
-                self.adjust_learning_rate(self.adam_optimizer, 5e-6)
-            elif self.num_epoch >= 200:
-                self.adjust_learning_rate(self.adam_optimizer, 2e-6)
-            elif self.num_epoch >= 300:
-                self.adjust_learning_rate(self.adam_optimizer, 1e-6)
+            # if self.num_epoch >= 50:
+            #     self.adjust_learning_rate(self.adam_optimizer, 2e-5)
+            # elif self.num_epoch >= 100:
+            #     self.adjust_learning_rate(self.adam_optimizer, 5e-6)
+            # elif self.num_epoch >= 200:
+            #     self.adjust_learning_rate(self.adam_optimizer, 2e-6)
+            # elif self.num_epoch >= 300:
+            #     self.adjust_learning_rate(self.adam_optimizer, 1e-6)
             
             # Train epoch
-            if self.num_epoch % self.cross_rate == 0:
-                self.train_epoch(cross=True)
-            else:
-                self.train_epoch(cross=False)
+            # if self.num_epoch % self.cross_rate == 0:
+            #     self.train_epoch(cross=True)
+            # else:
+            #     self.train_epoch(cross=False)
+            
+            self.train_epoch(cross=True)
             
             # Evaluation epoch
             with torch.no_grad():
@@ -115,7 +114,7 @@ class Trainer(object):
             roughness_gt = train_data_buffer['roughness_gt'].to(self.device)
             specular_gt = train_data_buffer['specular_gt'].to(self.device)
             normal_gt = train_data_buffer['normal_gt'].to(self.device)
-            view_pos_gt = train_data_buffer['view_pos_gt'].to(self.device)
+            pos_in_cam_gt = train_data_buffer['pos_in_cam_gt'].to(self.device)
             hdri_gt = train_data_buffer['hdri_gt'].to(self.device)
             
             # Random sampling training pixels
@@ -152,7 +151,7 @@ class Trainer(object):
                     'albedo_gt': albedo_gt[mask_gt][rand_indices],
                     'roughness_gt': roughness_gt[mask_gt][rand_indices],
                     'specular_gt': specular_gt[mask_gt][rand_indices],
-                    'view_pos_gt': view_pos_gt[mask_gt][rand_indices],
+                    'pos_in_cam_gt': pos_in_cam_gt[mask_gt][rand_indices],
                     'hdri_gt': hdri_gt
                 }
                 
@@ -170,7 +169,7 @@ class Trainer(object):
                         'albedo_gt': albedo_gt[mask_gt],
                         'roughness_gt': roughness_gt[mask_gt],
                         'specular_gt': specular_gt[mask_gt],
-                        'view_pos_gt': view_pos_gt[mask_gt],
+                        'pos_in_cam_gt': pos_in_cam_gt[mask_gt],
                         'hdri_gt': hdri_gt
                     }
                     
@@ -179,8 +178,8 @@ class Trainer(object):
                 B, H, W, C =  rgb_gt.shape
                 rec_image = torch.zeros(B, H, W, C, device=self.device)
                 rec_image[mask_gt] = rgb_rec
-            
-                shadow_map = self.shadow_estimator(rec_image.permute(0,3,1,2)).permute(0,2,3,1)
+
+                shadow_map = self.shadow_estimator(torch.cat([rec_image, normal_gt], dim=-1).permute(0,3,1,2)).permute(0,2,3,1)
             
                 # Reconstruction loss
                 rec_loss = self.rec_loss_fn(rec_image*shadow_map, rgb_gt)
@@ -210,6 +209,9 @@ class Trainer(object):
                 
                 
             #     tvf.to_pil_image(vis_image.permute(2,0,1)).save(self.images_dir + f"/train_e{self.num_epoch}_s{step}.png")
+        
+        # Adjust learning rate
+        self.lr_scheduler.step()
     
     def eval_epoch(self):
         
@@ -231,7 +233,7 @@ class Trainer(object):
             roughness_gt = eval_data_buffer['roughness_gt'].to(self.device)
             specular_gt = eval_data_buffer['specular_gt'].to(self.device)
             normal_gt = eval_data_buffer['normal_gt'].to(self.device)
-            view_pos_gt = eval_data_buffer['view_pos_gt'].to(self.device)
+            pos_in_cam_gt = eval_data_buffer['pos_in_cam_gt'].to(self.device)
             hdri_gt = eval_data_buffer['hdri_gt'].to(self.device)
             
             render_buffer = {
@@ -240,7 +242,7 @@ class Trainer(object):
                 'albedo_gt': albedo_gt[mask_gt],
                 'roughness_gt': roughness_gt[mask_gt],
                 'specular_gt': specular_gt[mask_gt],
-                'view_pos_gt': view_pos_gt[mask_gt],
+                'pos_in_cam_gt': pos_in_cam_gt[mask_gt],
                 'hdri_gt': hdri_gt
             }
             

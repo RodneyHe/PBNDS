@@ -11,36 +11,40 @@ import cv2 as cv
 import torch
 
 def load_sdr(image_name, resize=True, to_tensor=True):
+    
+    '''
+    The loaded SDR image would be transformed to range [0, 1].
+    '''
+    
+    image = cv.imread(image_name, cv.IMREAD_UNCHANGED)
+    
+    if len(image.shape) == 3:
+        if image.shape[2] == 4:
+            alpha_channel = image[...,3]
+            bgr_channels = image[...,:3]
+            rgb_channels = cv.cvtColor(bgr_channels, cv.COLOR_BGR2RGB)
             
-        image = cv.imread(image_name, cv.IMREAD_UNCHANGED)
-        
-        if len(image.shape) == 3:
-            if image.shape[2] == 4:
-                alpha_channel = image[...,3]
-                bgr_channels = image[...,:3]
-                rgb_channels = cv.cvtColor(bgr_channels, cv.COLOR_BGR2RGB)
-                
-                # White Background Image
-                background_image = np.zeros_like(rgb_channels, dtype=np.uint8)
-                
-                # Alpha factor
-                alpha_factor = alpha_channel[:,:,np.newaxis].astype(np.float32) / 255.
-                alpha_factor = np.concatenate((alpha_factor,alpha_factor,alpha_factor), axis=2)
+            # White Background Image
+            background_image = np.zeros_like(rgb_channels, dtype=np.uint8)
+            
+            # Alpha factor
+            alpha_factor = alpha_channel[:,:,np.newaxis].astype(np.float32) / 255.
+            alpha_factor = np.concatenate((alpha_factor,alpha_factor,alpha_factor), axis=2)
 
-                # Transparent Image Rendered on White Background
-                base = rgb_channels * alpha_factor
-                background = background_image * (1 - alpha_factor)
-                image = base + background
-            else:
-                image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
-        
-        if resize:
-            image = cv.resize(image, (128, 128), interpolation=cv.INTER_NEAREST)
-        
-        if to_tensor:
-            image = torch.from_numpy(image)
-        
-        return image / 255.
+            # Transparent Image Rendered on White Background
+            base = rgb_channels * alpha_factor
+            background = background_image * (1 - alpha_factor)
+            image = base + background
+        else:
+            image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+    
+    if resize:
+        image = cv.resize(image, (128, 128), interpolation=cv.INTER_NEAREST)
+    
+    if to_tensor:
+        image = torch.from_numpy(image)
+    
+    return image / 255.
 
 def load_hdr(image_name, resize=True, to_tensor=True, to_ldr=False):
     image = cv.imread(image_name, -1)

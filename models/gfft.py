@@ -10,7 +10,7 @@ class GaussianFourierFeatureTransform(torch.nn.Module):
     Returns: H,W,mapping_size*2
     """
     
-    def __init__(self, in_features, mapping_size=256, scale=5, device='gpu'):
+    def __init__(self, in_features, mapping_size=256, scale=5, device='cuda'):
         super().__init__()
 
         self.in_features = in_features

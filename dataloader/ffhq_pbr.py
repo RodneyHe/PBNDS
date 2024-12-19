@@ -2,25 +2,18 @@ import os, math, json, random
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 
 import numpy as np
-import cv2 as cv
 
 import torch
-import torchvision.transforms.functional as tvf
 from torch.utils.data import Dataset
+from torch.utils.data.dataloader import DataLoader
+
+from utils.io import load_sdr, load_hdr
 
 class FFHQPBR(Dataset):
-    def __init__(self, data_path, eval_rate=0.1, random_seed=0, mode=None):
+    def __init__(self, data_path, eval_rate=0.1, mode=None):
         super().__init__()
         
         self.width, self.height = 128, 128
-        self.mode = mode
-        
-        # Fix random seed
-        torch.manual_seed(random_seed)
-        torch.cuda.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed) 
-        np.random.seed(random_seed)
-        random.seed(random_seed)
         
         self.data_path = data_path
         self.rgb_gt_path = self.data_path + f'/bgremoval'
@@ -66,24 +59,20 @@ class FFHQPBR(Dataset):
         file_index = self.data_list[index]
         subfolder = int(file_index) // 1000 * 1000
         
-        rgb_gt = self.load_sdr(os.path.join(self.rgb_gt_path, f'{subfolder:05}/{file_index}.png'))
-        rgb_gt = rgb_gt / 255.
-        normal_gt = self.load_sdr(os.path.join(self.normal_gt_path, f'{subfolder:05}/normal_{file_index}.png'))
-        normal_gt = ((normal_gt / 255.) * 2 - 1.).float()
-        albedo_gt = self.load_sdr(os.path.join(self.albedo_gt_path, f'{subfolder:05}/albedo_{file_index}.png'))
-        albedo_gt = albedo_gt / 255.
-        roughness_gt = self.load_sdr(os.path.join(self.roughness_gt_path, f'{subfolder:05}/roughness_{file_index}.png'))
-        roughness_gt = roughness_gt / 255.
-        specular_gt = self.load_sdr(os.path.join(self.specular_gt_path, f'{subfolder:05}/specular_{file_index}.png'))
-        specular_gt = specular_gt / 255.
-        depth_gt = self.load_hdr(os.path.join(self.depth_gt_path, f'{subfolder:05}/depth_{file_index}.exr'))[...,0]
-        hdri_gt = self.load_hdr(os.path.join(self.light_gt_path, f'{subfolder:05}/hdri_{file_index}.exr'), resize=False)
+        rgb_gt = load_sdr(os.path.join(self.rgb_gt_path, f'{subfolder:05}/{file_index}.png'))
+        normal_gt = load_sdr(os.path.join(self.normal_gt_path, f'{subfolder:05}/normal_{file_index}.png'))
+        normal_gt = (normal_gt * 2 - 1.).float()
+        albedo_gt = load_sdr(os.path.join(self.albedo_gt_path, f'{subfolder:05}/albedo_{file_index}.png'))
+        roughness_gt = load_sdr(os.path.join(self.roughness_gt_path, f'{subfolder:05}/roughness_{file_index}.png'))
+        specular_gt = load_sdr(os.path.join(self.specular_gt_path, f'{subfolder:05}/specular_{file_index}.png'))
+        depth_gt = load_hdr(os.path.join(self.depth_gt_path, f'{subfolder:05}/depth_{file_index}.exr'))[...,0]
+        hdri_gt = load_hdr(os.path.join(self.light_gt_path, f'{subfolder:05}/hdri_{file_index}.exr'), resize=False)
         mask_gt = (rgb_gt != 0)[...,0]
         
         # Get view pos from estimated fov
         pred_fov = self.pred_fov_dict[str(file_index)]
         
-        view_pos_gt = self.get_view_pos(depth=depth_gt, width=self.width, height=self.height, fov=pred_fov)
+        camera_pos_gt = self.get_view_pos(depth=depth_gt, width=self.width, height=self.height, fov=pred_fov)
         
         data_buffer = {
             'rgb_gt': rgb_gt,
@@ -92,59 +81,13 @@ class FFHQPBR(Dataset):
             'roughness_gt': roughness_gt,
             'specular_gt': specular_gt,
             'depth_gt': depth_gt,
-            'view_pos_gt': view_pos_gt,
+            'camera_pos_gt': camera_pos_gt,
             'mask_gt': mask_gt,
             'hdri_gt': hdri_gt,
             'file_index': str(file_index)
         }
         
         return data_buffer
-    
-    def load_sdr(self, image_name, resize=True, to_tensor=True):
-        
-        image = cv.imread(image_name, cv.IMREAD_UNCHANGED)
-        
-        if len(image.shape) == 3:
-            if image.shape[2] == 4:
-                alpha_channel = image[...,3]
-                bgr_channels = image[...,:3]
-                rgb_channels = cv.cvtColor(bgr_channels, cv.COLOR_BGR2RGB)
-                
-                # White Background Image
-                background_image = np.zeros_like(rgb_channels, dtype=np.uint8)
-                
-                # Alpha factor
-                alpha_factor = alpha_channel[:,:,np.newaxis].astype(np.float32) / 255.
-                alpha_factor = np.concatenate((alpha_factor,alpha_factor,alpha_factor), axis=2)
-
-                # Transparent Image Rendered on White Background
-                base = rgb_channels * alpha_factor
-                background = background_image * (1 - alpha_factor)
-                image = base + background
-            else:
-                image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
-        if resize:
-            image = cv.resize(image, (self.width, self.height), interpolation=cv.INTER_NEAREST)
-        
-        if to_tensor:
-            image = torch.from_numpy(image)
-        
-        return image
-    
-    def load_hdr(self, image_name, resize=True, to_tensor=True, to_ldr=False):
-        image = cv.imread(image_name, -1)
-        image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
-        
-        if resize:
-            image = cv.resize(image, (self.width, self.height), interpolation=cv.INTER_NEAREST)
-        
-        if to_ldr:
-            image = image.clip(0, 1) ** (1 / 2.2)
-        
-        if to_tensor:
-            image = torch.from_numpy(image)
-        
-        return image
     
     def get_view_pos(self, depth, width, height, fov):
         fovx = math.radians(fov)
@@ -159,3 +102,37 @@ class FFHQPBR(Dataset):
         vpos[..., 1] = depth * Y * math.tan(fovy / 2)
         vpos[..., 2] = -depth
         return vpos
+
+def get_dataloader(data_folder, eval_rate, random_seed, batch_size, shuffle, num_workers):
+    
+    # Fix random seed
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed) 
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    
+    def worker_init_fn(worker_id):
+        np.random.seed(random_seed + worker_id)
+    
+    train_dataset = FFHQPBR(data_path=data_folder, 
+                            eval_rate=eval_rate, 
+                            mode='train')
+    train_loader = DataLoader(train_dataset, 
+                              batch_size=batch_size, 
+                              shuffle=shuffle, 
+                              num_workers=num_workers, 
+                              worker_init_fn=worker_init_fn,
+                              pin_memory=True)
+    
+    eval_dataset = FFHQPBR(data_path=data_folder, 
+                           eval_rate=eval_rate,
+                           mode='eval')
+    eval_loader = DataLoader(eval_dataset, 
+                             batch_size=batch_size, 
+                             shuffle=shuffle, 
+                             num_workers=num_workers, 
+                             worker_init_fn=worker_init_fn,
+                             pin_memory=True)
+    
+    return train_loader, eval_loader

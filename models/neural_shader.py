@@ -184,7 +184,7 @@ class NeuralShader(nn.Module):
                  fourier_features="positional",
                  mapping_size=256,
                  fft_scale=8,
-                 device='gpu'):
+                 device='cuda'):
         
         super().__init__()
         
@@ -193,6 +193,7 @@ class NeuralShader(nn.Module):
             self.fourier_feature_transform, channels = get_embedder(fft_scale, 11)
         elif fourier_features == "gfft":
             self.fourier_feature_transform = GaussianFourierFeatureTransform(11, mapping_size=mapping_size//2, scale=fft_scale, device=device)
+            channels = mapping_size
         elif fourier_features == "none":
             pass
         else:

@@ -24,7 +24,15 @@ class GGXShader(nn.Module):
         sharp = 2 / r2
         return amp * torch.exp(sharp * (cos - 1))
     
-    def render_equation(self, albedo, roughness, specular, normal, out_dirs, in_dirs, light):
+    def render_equation(self, shading_input):
+        
+        albedo = shading_input['albedo']
+        roughness = shading_input['roughness']
+        specular = shading_input['specular']
+        normal = shading_input['normal']
+        out_dirs = shading_input['out_dirs']
+        in_dirs = shading_input['in_dirs']
+        light = shading_input['hdri_samples']
         
         # Diffuse BRDF
         diffuse_brdf = (1 - specular) * albedo / torch.pi
@@ -65,7 +73,14 @@ class BlinnPhongShader(nn.Module):
         
         return render_output
     
-    def render_equation(self, albedo, specular, normal, out_dirs, in_dirs, light, m):
+    def render_equation(self, shading_input, m):
+        
+        albedo = shading_input['albedo']
+        specular = shading_input['specular']
+        normal = shading_input['normal']
+        out_dirs = shading_input['out_dirs']
+        in_dirs = shading_input['in_dirs']
+        light = shading_input['hdri_samples']
         
         # Diffuse BRDF
         half_dirs = in_dirs + out_dirs
