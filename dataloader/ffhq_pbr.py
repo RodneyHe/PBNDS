@@ -72,7 +72,7 @@ class FFHQPBR(Dataset):
         # Get view pos from estimated fov
         pred_fov = self.pred_fov_dict[str(file_index)]
         
-        camera_pos_gt = self.get_view_pos(depth=depth_gt, width=self.width, height=self.height, fov=pred_fov)
+        pos_in_cam_gt = self.get_cam_pos(depth=depth_gt, width=self.width, height=self.height, fov=pred_fov)
         
         data_buffer = {
             'rgb_gt': rgb_gt,
@@ -81,7 +81,7 @@ class FFHQPBR(Dataset):
             'roughness_gt': roughness_gt,
             'specular_gt': specular_gt,
             'depth_gt': depth_gt,
-            'camera_pos_gt': camera_pos_gt,
+            'pos_in_cam_gt': pos_in_cam_gt,
             'mask_gt': mask_gt,
             'hdri_gt': hdri_gt,
             'file_index': str(file_index)
@@ -89,7 +89,7 @@ class FFHQPBR(Dataset):
         
         return data_buffer
     
-    def get_view_pos(self, depth, width, height, fov):
+    def get_cam_pos(self, depth, width, height, fov):
         fovx = math.radians(fov)
         fovy = 2 * math.atan(math.tan(fovx / 2) / (width / height))
         vpos = torch.zeros(height, width, 3)

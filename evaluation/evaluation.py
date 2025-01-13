@@ -3,7 +3,6 @@ sys.path.append('..')
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 
 from tqdm import tqdm
-from utils.io import load_sdr, load_hdr
 from utils.sampler import Sampler
 
 import torch
@@ -39,15 +38,9 @@ class Tester:
         
         # Load shader
         self.ndr = NDR().to(self.device)
-        
-        self.pbndr = PBNDR(pretrained_weights='pretrained_weights/pbndr_weights').to(self.device)
-        
+        self.pbndr = PBNDR().to(self.device)
         self.ggx_shader = GGXShader()
-        
         self.blinphong_shader = BlinnPhongShader()
-        
-        if not os.path.exists(f'pretrained_weights/ndr_weights'):
-            os.mkdir(f'pretrained_weights/ndr_weights')
         
         # Camera position
         cam_pos = torch.tensor([0., 0., 0.])[None, None, :]
@@ -78,6 +71,12 @@ class Tester:
     
     def eval_metrics(self, model):
         
+        if not os.path.exists(f'{self.result_path}/{model}'):
+            os.mkdir(f'{self.result_path}/{model}')
+        
+        if not os.path.exists(f'{self.result_path}/{model}/pred_rgb'):
+            os.mkdir(f'{self.result_path}/{model}/pred_rgb')
+        
         data_iter = iter(self.data_loader)
         
         mse_list = []
@@ -99,21 +98,22 @@ class Tester:
             hdri_gt = data_buffer['hdri_gt'].to(self.device)
             file_index = data_buffer['file_index'][0]
             
-            # Calculate outbound direction
-            out_dirs_gt = self.cam_pos - pos_in_cam_gt.unsqueeze(1)
-            out_dirs_gt = nn.functional.normalize(out_dirs_gt, dim=-1)
-            
             if model == 'nds':
                 
-                nds_weights_path = f'pretrained_weights/ndr_weights/{file_index}.pth'
+                # Calculate outbound direction
+                out_dirs_gt = self.cam_pos - pos_in_cam_gt.unsqueeze(1)
+                out_dirs_gt = nn.functional.normalize(out_dirs_gt, dim=-1)
+                
+                nds_weights_path = f'../dataset/ffhq256_pbr/nds_weights/{file_index}.pth'
                 if not os.path.exists(nds_weights_path):
                     nds_pred_rgb = self.ndr.fit(position=pos_in_cam_gt, 
                                                 normal=normal_gt,
                                                 out_dirs=out_dirs_gt.squeeze(1),
+                                                rgb_gt=rgb_gt,
                                                 save_path=nds_weights_path)
                 else:
                     nds_weights = torch.load(nds_weights_path)
-                    self.ndr.load_state_dict(nds_weights)
+                    self.ndr.shader.load_state_dict(nds_weights)
             
                 with torch.no_grad():
                     
@@ -122,14 +122,13 @@ class Tester:
                                             normal=normal_gt,
                                             out_dirs=out_dirs_gt.squeeze(1))
                     
-                    rgb_vis = torch.zeros(1,128,128,3).to(self.device)
-                    rgb_vis[mask_gt] = nds_pred_rgb
+                    rgb_vis = nds_pred_rgb[0].permute(2,0,1)
                     
-                    self._test_FID(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2))
-                    mse_list.append(self._test_MSE(pred=nds_pred_rgb, gt=rgb_gt).item())
-                    psnr_list.append(self._test_PSNR(pred=rgb_vis, gt=rgb_gt).item())
-                    ssim_list.append(self._test_SSIM(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
-                    lpips_list.append(self._test_LPIPS(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
+                    self._test_FID(pred=rgb_vis[None], gt=rgb_gt.permute(0,3,1,2))
+                    mse_list.append(self._test_MSE(pred=rgb_vis[None], gt=rgb_gt.permute(0,3,1,2)).item())
+                    psnr_list.append(self._test_PSNR(pred=rgb_vis[None], gt=rgb_gt.permute(0,3,1,2)).item())
+                    ssim_list.append(self._test_SSIM(pred=rgb_vis[None], gt=rgb_gt.permute(0,3,1,2)).item())
+                    lpips_list.append(self._test_LPIPS(pred=rgb_vis[None], gt=rgb_gt.permute(0,3,1,2)).item())
             
             if model == 'pbnds':
                 
@@ -142,33 +141,57 @@ class Tester:
                     'hdri_gt': hdri_gt
                 }
                 
-                with torch.no_grad():
-                    pbnds_pred_rgb, shadow_pred = self.pbndr(render_buffer=render_buffer, 
-                                                             mask=mask_gt[0],
-                                                             num_light_samples=128)
+                pbnds_weights_path = 'pretrained_weights/pbndr_weights/NeuralRenderer.pth'
+                renderer_weights = torch.load(pbnds_weights_path)
+                self.pbndr.neural_render.load_state_dict({k: v for k, v in renderer_weights.items() if 'unet' not in k})
                 
-                unshadow = torch.zeros(128,128,3).to(self.device)
-                unshadow[mask_gt[0]] = pbnds_pred_rgb
-                unshadow = unshadow.permute(2,0,1)
+                shadow_weights_path = 'pretrained_weights/pbndr_weights/ShadowEstimator.pth'
+                if os.path.exists(shadow_weights_path):
+                    shadow_weights = torch.load(shadow_weights_path)
+                    self.pbndr.shadow_estimator.load_state_dict(shadow_weights)
+                    
+                    with torch.no_grad():
+                        pbnds_pred_rgb, shadow_pred = self.pbndr(render_buffer=render_buffer, mask=mask_gt[0], num_light_samples=128)
+                    
+                    unshadow = torch.zeros(128,128,3).to(self.device)
+                    unshadow[mask_gt[0]] = pbnds_pred_rgb
+                    unshadow = unshadow.permute(2,0,1)
+                    
+                    shadow_map = shadow_pred[0].permute(2,0,1)
+                    
+                    shadowed = unshadow * shadow_map
+                    
+                    rgb_vis = torch.cat([shadowed, shadow_map.repeat(3,1,1)], dim=2)
+                    
+                    pred = shadowed[None]
                 
-                shadow_map = shadow_pred[0].permute(2,0,1)
-                
-                shadowed = unshadow * shadow_map
+                else:
+                    with torch.no_grad():
+                        pbnds_pred_rgb = self.pbndr(render_buffer=render_buffer, mask=mask_gt[0], num_light_samples=128, 
+                                                    shadowing=False)
 
-                self._test_FID(pred=shadowed[None], gt=rgb_gt.permute(0,3,1,2))
-                mse_list.append(self._test_MSE(pred=shadowed[None], gt=rgb_gt.permute(0,3,1,2)).item())
-                psnr_list.append(self._test_PSNR(pred=shadowed[None], gt=rgb_gt.permute(0,3,1,2)).item())
-                ssim_list.append(self._test_SSIM(pred=shadowed[None], gt=rgb_gt.permute(0,3,1,2)).item())
-                lpips_list.append(self._test_LPIPS(pred=shadowed[None], gt=rgb_gt.permute(0,3,1,2)).item())
-                
-                rgb_vis = shadowed
+                    rgb_vis = torch.zeros(128,128,3).to(self.device)
+                    rgb_vis[mask_gt[0]] = pbnds_pred_rgb
+                    rgb_vis = rgb_vis.permute(2,0,1)
+                    
+                    pred = rgb_vis[None]
+
+                self._test_FID(pred=pred, gt=rgb_gt.permute(0,3,1,2))
+                mse_list.append(self._test_MSE(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                psnr_list.append(self._test_PSNR(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                ssim_list.append(self._test_SSIM(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                lpips_list.append(self._test_LPIPS(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
             
             if model == 'ggx':
                 
+                # Calculate outbound direction
+                out_dirs_gt = self.cam_pos - pos_in_cam_gt[mask_gt].unsqueeze(1)
+                out_dirs_gt = nn.functional.normalize(out_dirs_gt, dim=-1)
+                
                 # Sampling the HDRi environment map
                 sampled_hdri_map, sampled_direction = self.sampler.uniform_sampling(hdri_map=hdri_gt, num_samples=128)
                 
-                in_dirs_gt = sampled_direction.repeat(pos_in_cam_gt.shape[0],1,1)
+                in_dirs_gt = sampled_direction.repeat(pos_in_cam_gt[mask_gt].shape[0],1,1)
                 
                 shading_input = {
                     'normal': normal_gt[mask_gt].unsqueeze(1).broadcast_to(in_dirs_gt.shape),
@@ -176,29 +199,35 @@ class Tester:
                     'roughness': roughness_gt[mask_gt].unsqueeze(1)[...,None].broadcast_to(*in_dirs_gt.shape[:-1],1),
                     'specular': specular_gt[mask_gt].unsqueeze(1)[...,None].broadcast_to(*in_dirs_gt.shape[:-1],1),
                     'in_dirs': in_dirs_gt,
-                    'out_dirs': out_dirs_gt[mask_gt].broadcast_to(in_dirs_gt.shape),
+                    'out_dirs': out_dirs_gt.broadcast_to(in_dirs_gt.shape),
                     'hdri_samples': sampled_hdri_map.broadcast_to(in_dirs_gt.shape)
                 }
                 
-                ggx_pred_rgb = self.ggx_shader.render_equation(shading_input)
+                with torch.no_grad():
+                    ggx_pred_rgb = self.ggx_shader.render_equation(shading_input)
                 
-                rgb_vis = torch.zeros(1,128,128,3).to(self.device)
-                rgb_vis[mask_gt] = ggx_pred_rgb
+                rgb_vis = torch.zeros(128,128,3).to(self.device)
+                rgb_vis[mask_gt[0]] = ggx_pred_rgb
+                rgb_vis = rgb_vis.permute(2,0,1)
                 
-                tvf.to_pil_image(rgb_vis[0].permute(2,0,1)).save('./test.png')
+                pred = rgb_vis[None]
                 
-                self._test_FID(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2))
-                mse_list.append(self._test_MSE(pred=rgb_vis, gt=rgb_gt).item())
-                psnr_list.append(self._test_PSNR(pred=rgb_vis, gt=rgb_gt).item())
-                ssim_list.append(self._test_SSIM(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
-                lpips_list.append(self._test_LPIPS(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
+                self._test_FID(pred=pred, gt=rgb_gt.permute(0,3,1,2))
+                mse_list.append(self._test_MSE(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                psnr_list.append(self._test_PSNR(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                ssim_list.append(self._test_SSIM(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                lpips_list.append(self._test_LPIPS(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
                 
             if model == 'blinn-phong':
+                
+                # Calculate outbound direction
+                out_dirs_gt = self.cam_pos - pos_in_cam_gt[mask_gt].unsqueeze(1)
+                out_dirs_gt = nn.functional.normalize(out_dirs_gt, dim=-1)
                 
                 # Sampling the HDRi environment map
                 sampled_hdri_map, sampled_direction = self.sampler.uniform_sampling(hdri_map=hdri_gt, num_samples=128)
                 
-                in_dirs_gt = sampled_direction.repeat(pos_in_cam_gt.shape[0],1,1)
+                in_dirs_gt = sampled_direction.repeat(pos_in_cam_gt[mask_gt].shape[0],1,1)
                 
                 shading_input = {
                     'normal': normal_gt[mask_gt].unsqueeze(1).broadcast_to(in_dirs_gt.shape),
@@ -206,30 +235,33 @@ class Tester:
                     'roughness': roughness_gt[mask_gt].unsqueeze(1)[...,None].broadcast_to(*in_dirs_gt.shape[:-1],1),
                     'specular': specular_gt[mask_gt].unsqueeze(1)[...,None].broadcast_to(*in_dirs_gt.shape[:-1],1),
                     'in_dirs': in_dirs_gt,
-                    'out_dirs': out_dirs_gt[mask_gt].broadcast_to(in_dirs_gt.shape),
+                    'out_dirs': out_dirs_gt.broadcast_to(in_dirs_gt.shape),
                     'hdri_samples': sampled_hdri_map.broadcast_to(in_dirs_gt.shape)
                 }
                 
                 with torch.no_grad():
                     blinnphong_pred_rgb = self.blinphong_shader.render_equation(shading_input, 16)
                 
-                rgb_vis = torch.zeros(1,128,128,3).to(self.device)
-                rgb_vis[mask_gt] = blinnphong_pred_rgb
+                rgb_vis = torch.zeros(128,128,3).to(self.device)
+                rgb_vis[mask_gt[0]] = blinnphong_pred_rgb
+                rgb_vis = rgb_vis.permute(2,0,1)
                 
-                self._test_FID(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2))
-                mse_list.append(self._test_MSE(pred=rgb_vis, gt=rgb_gt).item())
-                psnr_list.append(self._test_PSNR(pred=rgb_vis, gt=rgb_gt).item())
-                ssim_list.append(self._test_SSIM(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
-                lpips_list.append(self._test_LPIPS(pred=rgb_vis.permute(0,3,1,2), gt=rgb_gt.permute(0,3,1,2)).item())
+                pred = rgb_vis[None]
+                
+                self._test_FID(pred=pred, gt=rgb_gt.permute(0,3,1,2))
+                mse_list.append(self._test_MSE(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                psnr_list.append(self._test_PSNR(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                ssim_list.append(self._test_SSIM(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
+                lpips_list.append(self._test_LPIPS(pred=pred, gt=rgb_gt.permute(0,3,1,2)).item())
             
-            tvf.to_pil_image(rgb_vis).save(f'{self.result_path}/{model}_{file_index}.png')
+            tvf.to_pil_image(rgb_vis).save(f'{self.result_path}/{model}/pred_rgb/pred_{file_index}.png')
         
         if self.save_matrics:
             # Save metric data
-            torch.save(torch.tensor(mse_list), f'{self.result_path}/eval_result01/mse_{model}.pth')
-            torch.save(torch.tensor(psnr_list), f'./eval_result01/psnr_{model}.pth')
-            torch.save(torch.tensor(ssim_list), f'./eval_result01/ssim_{model}.pth')
-            torch.save(torch.tensor(lpips_list), f'./eval_result01/lpips_{model}.pth')
+            torch.save(torch.tensor(mse_list), f'{self.result_path}/{model}/mse.pth')
+            torch.save(torch.tensor(psnr_list), f'{self.result_path}/{model}/psnr.pth')
+            torch.save(torch.tensor(ssim_list), f'{self.result_path}/{model}/ssim.pth')
+            torch.save(torch.tensor(lpips_list), f'{self.result_path}/{model}/lpips.pth')
         
             report = {
                 'mse': sum(mse_list)/ len(mse_list),
@@ -240,18 +272,18 @@ class Tester:
             }
         
             json_object = json.dumps(report, indent=4)
-            with open(f'./eval_result01/report_{model}.json', 'w') as outfile:
+            with open(f'{self.result_path}/{model}/report.json', 'w') as outfile:
                 outfile.write(json_object)
 
 if __name__ == '__main__':
     
-    # dataset = FFHQPBR(data_path=dataset_path, mode='test')
-    # sffhqpbr_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+    dataset = FFHQPBR(data_path='../dataset/ffhq256_pbr', mode='test')
+    ffhqpbr_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
     
-    testdata_loader = get_dataloader(data_folder='test_data02')
+    #testdata_loader = get_dataloader(data_folder='test_data02')
     
-    tester = Tester(data_loader=testdata_loader, configs=None)
+    tester = Tester(data_loader=ffhqpbr_loader, configs=None, save_matrics=True)
     #tester.eval_metrics('nds')
     tester.eval_metrics('pbnds')
-    # tester.eval_metrics('ggx')
-    # tester.eval_metrics('blinn-phong')
+    #tester.eval_metrics('ggx')
+    #tester.eval_metrics('blinn-phong')

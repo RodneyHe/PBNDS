@@ -9,7 +9,7 @@
         "num_pixel_samples": 8192,
         "num_light_samples": 128,
         "initial_lr": 5e-5,
-        "total_epochs": 40,
+        "total_epochs": 400000,
         "cross_rate": 2
     },
     "evaluation": {
