@@ -20,7 +20,7 @@ dependencies:
   - brunsli=0.1=h2531618_0
   - bzip2=1.0.8=h7b6447c_0
   - c-ares=1.19.1=h5eee18b_0
-  - ca-certificates=2024.9.24=h06a4308_0
+  - ca-certificates=2024.11.26=h06a4308_0
   - certifi=2024.8.30=py39h06a4308_0
   - cffi=1.15.1=py39h5eee18b_3
   - cfitsio=3.470=h5893167_7
@@ -163,7 +163,6 @@ dependencies:
   - pcre=8.45=h295c915_0
   - pexpect=4.8.0=pyhd3eb1b0_3
   - pickleshare=0.7.5=pyhd3eb1b0_1003
-  - pillow=9.4.0=py39h6a678d5_1
   - pip=23.2.1=py39h06a4308_0
   - platformdirs=3.10.0=py39h06a4308_0
   - ply=3.11=py39h06a4308_0
@@ -181,9 +180,9 @@ dependencies:
   - python-dateutil=2.8.2=pyhd3eb1b0_0
   - python_abi=3.9=2_cp39
   - pytorch=2.0.1=py3.9_cuda11.8_cudnn8.7.0_0
-  - pytorch-cuda=11.8=h7e8668a_5
+  - pytorch-cuda=11.8=h7e8668a_6
   - pytorch-mutex=1.0=cuda
-  - pytorch3d=0.7.4=py39_cu118_pyt201
+  - pytorch3d=0.7.7=py39_cu118_pyt201
   - pytz=2023.3.post1=py39h06a4308_0
   - pywavelets=1.4.1=py39h5eee18b_0
   - pyyaml=6.0=py39h5eee18b_1
@@ -209,8 +208,6 @@ dependencies:
   - tk=8.6.12=h1ccaba5_0
   - toml=0.10.2=pyhd3eb1b0_0
   - toolz=0.12.0=py39h06a4308_0
-  - torchaudio=2.0.2=py39_cu118
-  - torchmetrics=1.2.0=pyhd8ed1ab_0
   - torchtriton=2.0.0=py39
   - torchvision=0.15.2=py39_cu118
   - tornado=6.3.2=py39h5eee18b_0
@@ -233,30 +230,79 @@ dependencies:
   - pip:
       - absl-py==2.0.0
       - accelerate==1.0.0
+      - attrs==24.2.0
+      - beautifulsoup4==4.12.3
       - cachetools==5.3.2
+      - chumpy==0.70
       - comm==0.2.2
+      - cython==3.0.11
       - diffusers==0.30.3
+      - dlib==19.24.6
+      - face-alignment==1.4.1
+      - flatbuffers==24.3.25
+      - freetype-py==2.5.1
+      - gdown==5.2.0
       - google-auth==2.25.2
       - google-auth-oauthlib==1.2.0
       - grpcio==1.60.0
       - huggingface-hub==0.25.1
+      - imageio-ffmpeg==0.5.1
       - ipywidgets==8.1.5
+      - jax==0.4.30
+      - jaxlib==0.4.30
       - jupyterlab-widgets==3.0.13
+      - kornia==0.7.4
+      - kornia-rs==0.1.7
+      - llvmlite==0.43.0
+      - mako==1.3.6
       - markdown==3.5.1
-      - numpy==1.26.4
+      - mediapipe==0.10.18
+      - ml-dtypes==0.5.0
+      - ninja==1.11.1.2
+      - numba==0.60.0
+      - numpy==1.23.4
+      - nvidia-cublas-cu12==12.1.3.1
+      - nvidia-cuda-cupti-cu12==12.1.105
+      - nvidia-cuda-nvrtc-cu12==12.1.105
+      - nvidia-cuda-runtime-cu12==12.1.105
+      - nvidia-cudnn-cu12==8.9.2.26
+      - nvidia-cufft-cu12==11.0.2.54
+      - nvidia-curand-cu12==10.3.2.106
+      - nvidia-cusolver-cu12==11.4.5.107
+      - nvidia-cusparse-cu12==12.1.0.106
+      - nvidia-nccl-cu12==2.19.3
+      - nvidia-nvjitlink-cu12==12.6.85
+      - nvidia-nvtx-cu12==12.1.105
       - oauthlib==3.2.2
+      - opencv-contrib-python==4.10.0.84
       - opencv-python==4.8.0.76
-      - protobuf==4.23.4
+      - opt-einsum==3.4.0
+      - pillow==10.2.0
+      - protobuf==4.25.5
       - pyasn1==0.5.1
       - pyasn1-modules==0.3.0
+      - pycuda==2024.1.2
+      - pyglet==2.0.18
+      - pyopengl==3.1.0
+      - pyrender==0.1.39
+      - pytools==2024.1.14
       - regex==2024.9.11
       - requests-oauthlib==1.3.1
       - rsa==4.9
       - safetensors==0.4.5
+      - sentencepiece==0.2.0
+      - smplx==0.1.28
+      - sounddevice==0.5.1
+      - soupsieve==2.6
       - tensorboard==2.15.1
       - tensorboard-data-server==0.7.2
       - tokenizers==0.20.0
+      - torch-fidelity==0.3.0
+      - torchmetrics==1.6.0
       - transformers==4.45.2
+      - trimesh==3.6.18
+      - triton==2.2.0
+      - typing-extensions==4.12.2
       - werkzeug==3.0.1
       - widgetsnbextension==4.0.13
 prefix: /home/zhuo/anaconda3/envs/pbnds

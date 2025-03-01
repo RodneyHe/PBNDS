@@ -1,11 +1,10 @@
 __pycache__
-dataset
+dataset/*
 output
-output_old
 .vscode
 models/data
 evaluation/result
 evaluation/data
 evaluation/pretrained_weights
-pretrained
+pretrained/*
 relighting/exp
